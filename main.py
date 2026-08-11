@@ -24,7 +24,7 @@ SYSTEM_PROMPT = os.getenv(
 )
 
 # ============================================================
-# CLIENTS
+# CLIENTS & MEMORY
 # ============================================================
 
 groq = OpenAI(
@@ -34,6 +34,9 @@ groq = OpenAI(
 
 memory = {}
 MAX_MESSAGES = 20
+
+# مجموعة لتخزين ID المحادثات المتوقفة مؤقتاً
+paused_chats = set()
 
 # ============================================================
 # TELEGRAM
@@ -117,7 +120,7 @@ def send_business_message(chat_id, business_connection_id, text):
 
 
 # ============================================================
-# MESSAGE PROCESSING
+# MESSAGE PROCESSING (WITH PAUSE / RESUME)
 # ============================================================
 
 def process_business_message(message):
@@ -125,19 +128,33 @@ def process_business_message(message):
         chat = message.get("chat", {})
         chat_id = chat.get("id")
         business_connection_id = message.get("business_connection_id")
-        text = message.get("text")
+        text = message.get("text", "").strip()
 
         if not chat_id or not business_connection_id or not text:
             return
 
-        text = text.strip()
-        if not text:
+        # أمر إيقاف البوت في هذه المحادثة
+        if text == "/stop":
+            paused_chats.add(chat_id)
+            print(f"[PAUSED] Bot paused for chat {chat_id}")
+            send_business_message(chat_id, business_connection_id, "⏸ تم إيقاف البوت مؤقتاً في هذه المحادثة.")
+            return
+
+        # أمر إعادة تشغيل البوت
+        if text == "/resume":
+            paused_chats.discard(chat_id)
+            print(f"[RESUMED] Bot resumed for chat {chat_id}")
+            send_business_message(chat_id, business_connection_id, "▶️ تم إعادة تفعيل البوت.")
+            return
+
+        # تجاهل الرسالة إذا كانت المحادثة متوقفة
+        if chat_id in paused_chats:
             return
 
         print(f"[Telegram] {chat_id}: {text}")
 
+        # توليد الرد وإرساله
         reply = generate_reply(chat_id, text)
-
         print(f"[AI] {reply}")
 
         send_business_message(chat_id, business_connection_id, reply)
@@ -216,8 +233,5 @@ def start_polling():
 # ============================================================
 
 if __name__ == "__main__":
-    # 1. تشغيل سيرفر الـ Port في Thread مستقل للـ Web Service
     threading.Thread(target=run_dummy_server, daemon=True).start()
-
-    # 2. بدء الحلقة التكرارية للـ Polling
     start_polling()

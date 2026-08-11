@@ -1,9 +1,9 @@
 import os
 import time
-import requests
-from openai import OpenAI
 import threading
+import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from openai import OpenAI
 
 # ============================================================
 # CONFIG
@@ -146,24 +146,78 @@ def process_business_message(message):
         print(f"[ERROR] {type(e).__name__}: {e}")
 
 
+# ============================================================
+# DUMMY HTTP SERVER (For Render Port Check)
+# ============================================================
 
-# خادم بسيط لفتح Port يستجيب لـ Render
 def run_dummy_server():
     port = int(os.getenv("PORT", "10000"))
-    class SimpleHandler(BaseHTTPRequestHandler):
+    
+    class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            self.wfile.write(b"Bot is running via Long Polling")
-        def log_message(self, format, *args):
-            return  # إخفاء سجلات طلبات Health Check
+            self.wfile.write(b'{"status": "online", "mode": "polling"}')
 
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+        def log_message(self, format, *args):
+            return
+
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
+
+# ============================================================
+# POLLING LOOP
+# ============================================================
+
+def start_polling():
+    try:
+        telegram("deleteWebhook", {"drop_pending_updates": False})
+        print("[WEBHOOK] Deleted successfully.")
+    except Exception as e:
+        print(f"[WEBHOOK DELETE ERROR] {e}")
+
+    offset = 0
+    print("[BOT] Starting Long Polling...")
+
+    while True:
+        try:
+            data = {
+                "offset": offset,
+                "timeout": 30,
+                "allowed_updates": [
+                    "business_connection",
+                    "business_message",
+                    "edited_business_message",
+                    "deleted_business_messages"
+                ]
+            }
+
+            updates = telegram("getUpdates", data).get("result", [])
+
+            for update in updates:
+                offset = update["update_id"] + 1
+
+                message = update.get("business_message")
+                if message:
+                    process_business_message(message)
+
+        except requests.exceptions.RequestException as e:
+            print(f"[NETWORK ERROR] {e}")
+            time.sleep(5)
+        except Exception as e:
+            print(f"[POLLING ERROR] {e}")
+            time.sleep(3)
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
 if __name__ == "__main__":
-    # تشغيل خادم الـ Port في الخلفية
+    # 1. تشغيل سيرفر الـ Port في Thread مستقل للـ Web Service
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
-    # بدء البولينج
+
+    # 2. بدء الحلقة التكرارية للـ Polling
     start_polling()
