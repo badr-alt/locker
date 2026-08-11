@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: telegram-groq-ai
+    runtime: python
+
+    buildCommand: pip install -r requirements.txt
+
+    startCommand: gunicorn main:app --bind 0.0.0.0:$PORT --workers 1
+
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+
+      - key: GROQ_API_KEY
+        sync: false
+
+      - key: WEBHOOK_SECRET
+        sync: false
+
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+
+      - key: SYSTEM_PROMPT
+        value: أنت مساعد ذكي يتحدث نيابة عن صاحب الحساب. رد بشكل طبيعي وودود ومختصر. لا تقل إنك بوت أو ذكاء اصطناعي إلا إذا كان ذلك ضروريًا.
+
+      - key: PYTHON_VERSION
+        value: 3.11.11
