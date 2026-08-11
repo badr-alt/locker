@@ -2,6 +2,8 @@ import os
 import time
 import requests
 from openai import OpenAI
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============================================================
 # CONFIG
@@ -144,50 +146,24 @@ def process_business_message(message):
         print(f"[ERROR] {type(e).__name__}: {e}")
 
 
-# ============================================================
-# POLLING LOOP
-# ============================================================
 
-def start_polling():
-    # إلغاء الـ Webhook القديم لتجنب التعارض (Conflict Error)
-    try:
-        telegram("deleteWebhook", {"drop_pending_updates": False})
-        print("[WEBHOOK] Deleted successfully.")
-    except Exception as e:
-        print(f"[WEBHOOK DELETE ERROR] {e}")
+# خادم بسيط لفتح Port يستجيب لـ Render
+def run_dummy_server():
+    port = int(os.getenv("PORT", "10000"))
+    class SimpleHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"Bot is running via Long Polling")
+        def log_message(self, format, *args):
+            return  # إخفاء سجلات طلبات Health Check
 
-    offset = 0
-    print("[BOT] Starting Long Polling...")
-
-    while True:
-        try:
-            data = {
-                "offset": offset,
-                "timeout": 30,
-                "allowed_updates": [
-                    "business_connection",
-                    "business_message",
-                    "edited_business_message",
-                    "deleted_business_messages"
-                ]
-            }
-
-            updates = telegram("getUpdates", data).get("result", [])
-
-            for update in updates:
-                offset = update["update_id"] + 1
-
-                message = update.get("business_message")
-                if message:
-                    process_business_message(message)
-
-        except requests.exceptions.RequestException as e:
-            print(f"[NETWORK ERROR] {e}")
-            time.sleep(5)
-        except Exception as e:
-            print(f"[POLLING ERROR] {e}")
-            time.sleep(3)
-
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
 
 if __name__ == "__main__":
+    # تشغيل خادم الـ Port في الخلفية
+    threading.Thread(target=run_dummy_server, daemon=True).start()
+    
+    # بدء البولينج
     start_polling()
