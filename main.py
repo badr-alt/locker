@@ -1,7 +1,6 @@
 import os
-import threading
+import time
 import requests
-from flask import Flask, request, jsonify
 from openai import OpenAI
 
 # ============================================================
@@ -22,25 +21,16 @@ SYSTEM_PROMPT = os.getenv(
 """
 )
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-this-secret")
-
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
-
 # ============================================================
 # CLIENTS
 # ============================================================
-
-app = Flask(__name__)
 
 groq = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1"
 )
 
-# ذاكرة مؤقتة للمحادثات
-# ستختفي عند إعادة تشغيل Render.
 memory = {}
-
 MAX_MESSAGES = 20
 
 # ============================================================
@@ -50,13 +40,12 @@ MAX_MESSAGES = 20
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
-def telegram(method, data):
+def telegram(method, data=None):
     response = requests.post(
         f"{TELEGRAM_API}/{method}",
-        json=data,
-        timeout=20
+        json=data or {},
+        timeout=35
     )
-
     response.raise_for_status()
     return response.json()
 
@@ -66,7 +55,6 @@ def telegram(method, data):
 # ============================================================
 
 def generate_reply(chat_id, user_text):
-
     if chat_id not in memory:
         memory[chat_id] = []
 
@@ -95,7 +83,6 @@ def generate_reply(chat_id, user_text):
 
     reply = response.choices[0].message.content.strip()
 
-    # حفظ المحادثة
     history.append({
         "role": "user",
         "content": user_text
@@ -106,7 +93,6 @@ def generate_reply(chat_id, user_text):
         "content": reply
     })
 
-    # تحديد حجم الذاكرة
     if len(history) > MAX_MESSAGES:
         memory[chat_id] = history[-MAX_MESSAGES:]
 
@@ -117,12 +103,7 @@ def generate_reply(chat_id, user_text):
 # SEND MESSAGE AS BUSINESS ACCOUNT
 # ============================================================
 
-def send_business_message(
-    chat_id,
-    business_connection_id,
-    text
-):
-
+def send_business_message(chat_id, business_connection_id, text):
     return telegram(
         "sendMessage",
         {
@@ -138,172 +119,75 @@ def send_business_message(
 # ============================================================
 
 def process_business_message(message):
-
     try:
-
         chat = message.get("chat", {})
         chat_id = chat.get("id")
-
-        business_connection_id = message.get(
-            "business_connection_id"
-        )
-
+        business_connection_id = message.get("business_connection_id")
         text = message.get("text")
 
-        if not chat_id:
+        if not chat_id or not business_connection_id or not text:
             return
 
-        if not business_connection_id:
-            return
-
-        if not text:
-            return
-
-        # تجاهل الرسائل الفارغة
         text = text.strip()
-
         if not text:
             return
 
-        print(
-            f"[Telegram] {chat_id}: {text}"
-        )
+        print(f"[Telegram] {chat_id}: {text}")
 
-        # توليد الرد
-        reply = generate_reply(
-            chat_id,
-            text
-        )
+        reply = generate_reply(chat_id, text)
 
-        print(
-            f"[AI] {reply}"
-        )
+        print(f"[AI] {reply}")
 
-        # إرسال الرد من الحساب الشخصي
-        send_business_message(
-            chat_id,
-            business_connection_id,
-            reply
-        )
+        send_business_message(chat_id, business_connection_id, reply)
 
     except Exception as e:
-
-        print(
-            f"[ERROR] {type(e).__name__}: {e}"
-        )
+        print(f"[ERROR] {type(e).__name__}: {e}")
 
 
 # ============================================================
-# WEBHOOK
+# POLLING LOOP
 # ============================================================
 
-@app.post("/webhook")
-def webhook():
+def start_polling():
+    # إلغاء الـ Webhook القديم لتجنب التعارض (Conflict Error)
+    try:
+        telegram("deleteWebhook", {"drop_pending_updates": False})
+        print("[WEBHOOK] Deleted successfully.")
+    except Exception as e:
+        print(f"[WEBHOOK DELETE ERROR] {e}")
 
-    # التحقق من Telegram Secret Token
-    received_secret = request.headers.get(
-        "X-Telegram-Bot-Api-Secret-Token"
-    )
+    offset = 0
+    print("[BOT] Starting Long Polling...")
 
-    if received_secret != WEBHOOK_SECRET:
-        return jsonify({
-            "ok": False,
-            "error": "Unauthorized"
-        }), 401
+    while True:
+        try:
+            data = {
+                "offset": offset,
+                "timeout": 30,
+                "allowed_updates": [
+                    "business_connection",
+                    "business_message",
+                    "edited_business_message",
+                    "deleted_business_messages"
+                ]
+            }
 
-    update = request.get_json(
-        silent=True
-    ) or {}
+            updates = telegram("getUpdates", data).get("result", [])
 
-    # رسائل Business
-    message = update.get(
-        "business_message"
-    )
+            for update in updates:
+                offset = update["update_id"] + 1
 
-    if message:
+                message = update.get("business_message")
+                if message:
+                    process_business_message(message)
 
-        # تشغيل المعالجة في الخلفية
-        thread = threading.Thread(
-            target=process_business_message,
-            args=(message,),
-            daemon=True
-        )
+        except requests.exceptions.RequestException as e:
+            print(f"[NETWORK ERROR] {e}")
+            time.sleep(5)
+        except Exception as e:
+            print(f"[POLLING ERROR] {e}")
+            time.sleep(3)
 
-        thread.start()
-
-    return jsonify({
-        "ok": True
-    })
-
-
-# ============================================================
-# HEALTH CHECK
-# ============================================================
-
-@app.get("/")
-def home():
-
-    return jsonify({
-        "status": "online",
-        "service": "Telegram AI Business Bot",
-        "model": MODEL
-    })
-
-
-# ============================================================
-# SET TELEGRAM WEBHOOK
-# ============================================================
-
-def setup_webhook():
-
-    if not RENDER_URL:
-        print(
-            "[WARNING] RENDER_EXTERNAL_URL not found."
-        )
-        return
-
-    webhook_url = (
-        RENDER_URL.rstrip("/")
-        + "/webhook"
-    )
-
-    result = telegram(
-        "setWebhook",
-        {
-            "url": webhook_url,
-
-            "secret_token": WEBHOOK_SECRET,
-
-            "allowed_updates": [
-                "business_connection",
-                "business_message",
-                "edited_business_message",
-                "deleted_business_messages"
-            ],
-
-            "drop_pending_updates": False
-        }
-    )
-
-    print(
-        "[WEBHOOK]",
-        result
-    )
-
-
-# ============================================================
-# STARTUP
-# ============================================================
 
 if __name__ == "__main__":
-
-    setup_webhook()
-
-    port = int(
-        os.getenv("PORT", "10000")
-    )
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    start_polling()
